@@ -59,6 +59,7 @@ class FakeRepo:
 class FakeRedis:
     def __init__(self) -> None:
         self.pushed: list[tuple[str, str]] = []
+        self.counters: dict[str, int] = {}
 
     async def ping(self) -> bool:
         return True
@@ -66,6 +67,16 @@ class FakeRedis:
     async def lpush(self, key: str, value: str) -> int:
         self.pushed.append((key, value))
         return len(self.pushed)
+
+    async def incr(self, key: str) -> int:
+        self.counters[key] = self.counters.get(key, 0) + 1
+        return self.counters[key]
+
+    async def expire(self, _key: str, _seconds: int) -> bool:
+        return True
+
+    async def ttl(self, _key: str) -> int:
+        return 60
 
 
 def test_submit_job_deduplicates_equivalent_geometries() -> None:

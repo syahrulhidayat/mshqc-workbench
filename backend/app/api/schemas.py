@@ -5,8 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AllowedMethod = Literal["RHF", "RMP2", "OMP2"]
-AllowedBasis = Literal["sto-3g", "6-31g", "cc-pvdz"]
+AllowedMethod = Literal["RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3"]
+AllowedBasis = Literal["sto-3g", "6-31g", "cc-pvdz", "cc-pvtz"]
 
 
 class JobCreateRequest(BaseModel):
@@ -32,3 +32,11 @@ class JobResponse(BaseModel):
     cache_hit: bool = False
     created_at: datetime
     updated_at: datetime
+
+
+class CapabilitiesResponse(BaseModel):
+    active_engine: str
+    mshqc_installed: bool
+    mshqc_version: str | None = None
+    methods: list[str]
+    basis_sets: list[str]

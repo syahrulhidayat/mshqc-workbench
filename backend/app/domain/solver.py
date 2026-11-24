@@ -6,28 +6,57 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 from app.domain.geometry import ATOMIC_NUMBERS, Atom
+from app.domain.mshqc_adapter import (
+    IterationRecord,
+    SolveResult,
+    detect_mshqc_version,
+    run_mshqc,
+)
+
+__all__ = [
+    "IterationRecord",
+    "SolveResult",
+    "SolverCapabilities",
+    "SUPPORTED_BASIS_SETS",
+    "SUPPORTED_METHODS",
+    "execute_solver",
+    "get_capabilities",
+    "nuclear_repulsion_energy",
+]
 
 BOHR_PER_ANGSTROM = 1.8897261246257702
+SUPPORTED_METHODS: tuple[str, ...] = ("RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3")
+SUPPORTED_BASIS_SETS: tuple[str, ...] = ("sto-3g", "6-31g", "cc-pvdz", "cc-pvtz")
 
 
 @dataclass(frozen=True)
-class IterationRecord:
-    iteration: int
-    energy_hartree: float
-    delta_e: float
-    elapsed_ms: float
+class SolverCapabilities:
+    active_engine: str
+    mshqc_installed: bool
+    mshqc_version: str | None
+    methods: tuple[str, ...]
+    basis_sets: tuple[str, ...]
 
 
-@dataclass(frozen=True)
-class SolveResult:
-    engine: str
-    method: str
-    basis: str
-    nuclear_repulsion_hartree: float
-    total_energy_hartree: float
-    converged: bool
-    iterations: list[dict[str, float | int]]
-    wall_time_ms: float
+def get_capabilities(backend_preference: str = "auto") -> SolverCapabilities:
+    version = detect_mshqc_version()
+    installed = version is not None
+    if backend_preference == "surrogate":
+        active = "surrogate-deterministic"
+    elif installed:
+        active = f"mshqc-{version}"
+    elif backend_preference == "mshqc":
+        active = "mshqc-unavailable"
+    else:
+        active = "surrogate-deterministic"
+
+    return SolverCapabilities(
+        active_engine=active,
+        mshqc_installed=installed,
+        mshqc_version=version,
+        methods=SUPPORTED_METHODS,
+        basis_sets=SUPPORTED_BASIS_SETS,
+    )
 
 
 def nuclear_repulsion_energy(atoms: tuple[Atom, ...]) -> float:
@@ -44,52 +73,6 @@ def nuclear_repulsion_energy(atoms: tuple[Atom, ...]) -> float:
     return energy
 
 
-def _run_mshqc_engine(
-    atoms: tuple[Atom, ...],
-    method: str,
-    basis: str,
-    charge: int,
-    multiplicity: int,
-    on_iteration: Callable[[IterationRecord], None] | None,
-) -> SolveResult | None:
-    try:
-        import mshqc  # type: ignore[import-not-found]
-    except ImportError:
-        return None
-
-    t0 = time.perf_counter()
-    geom_str = "\n".join(f"{a.symbol} {a.x:.8f} {a.y:.8f} {a.z:.8f}" for a in atoms)
-    e_nuc = nuclear_repulsion_energy(atoms)
-
-    mol_factory = getattr(mshqc, "molecule", None)
-    calc_fn = getattr(mshqc, "energy", None)
-    if mol_factory is None or calc_fn is None:
-        return None
-
-    mol = mol_factory(geom_str, charge=charge, multiplicity=multiplicity)
-    energy = float(calc_fn(method.lower(), mol=mol, basis=basis))
-    elapsed = (time.perf_counter() - t0) * 1000.0
-    rec = IterationRecord(
-        iteration=1,
-        energy_hartree=energy,
-        delta_e=0.0,
-        elapsed_ms=round(elapsed, 2),
-    )
-    if on_iteration is not None:
-        on_iteration(rec)
-
-    return SolveResult(
-        engine="mshqc",
-        method=method,
-        basis=basis,
-        nuclear_repulsion_hartree=round(e_nuc, 10),
-        total_energy_hartree=round(energy, 10),
-        converged=True,
-        iterations=[asdict(rec)],
-        wall_time_ms=round(elapsed, 2),
-    )
-
-
 def _run_deterministic_surrogate(
     atoms: tuple[Atom, ...],
     method: str,
@@ -101,8 +84,20 @@ def _run_deterministic_surrogate(
     t0 = time.perf_counter()
     e_nuc = nuclear_repulsion_energy(atoms)
     electronic_scale = sum(-(ATOMIC_NUMBERS[a.symbol] ** 2.15) * 0.62 for a in atoms)
-    method_shift = {"RHF": 0.0, "RMP2": -0.214, "OMP2": -0.228}.get(method, -0.05)
-    basis_shift = {"sto-3g": 0.45, "6-31g": 0.12, "cc-pvdz": 0.0}.get(basis.lower(), 0.05)
+    method_shift = {
+        "RHF": 0.0,
+        "UHF": -0.015,
+        "RMP2": -0.214,
+        "UMP2": -0.219,
+        "OMP2": -0.228,
+        "OMP3": -0.241,
+    }.get(method, -0.05)
+    basis_shift = {
+        "sto-3g": 0.45,
+        "6-31g": 0.12,
+        "cc-pvdz": 0.0,
+        "cc-pvtz": -0.045,
+    }.get(basis.lower(), 0.05)
     target_energy = electronic_scale + e_nuc + method_shift + basis_shift
 
     history: list[dict[str, float | int]] = []
@@ -152,7 +147,16 @@ def execute_solver(
     step_delay_s: float = 0.08,
 ) -> SolveResult:
     if backend_preference in {"auto", "mshqc"}:
-        result = _run_mshqc_engine(atoms, method, basis, charge, multiplicity, on_iteration)
+        e_nuc = nuclear_repulsion_energy(atoms)
+        result = run_mshqc(
+            atoms=atoms,
+            method=method,
+            basis=basis,
+            charge=charge,
+            multiplicity=multiplicity,
+            nuclear_repulsion_hartree=e_nuc,
+            on_iteration=on_iteration,
+        )
         if result is not None:
             return result
         if backend_preference == "mshqc":
