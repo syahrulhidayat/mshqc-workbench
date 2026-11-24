@@ -79,3 +79,110 @@ def test_capabilities_endpoint_returns_supported_methods_and_engine() -> None:
         assert "OMP2" in body["methods"]
         assert "OMP3" in body["methods"]
         assert "cc-pvtz" in body["basis_sets"]
+
+
+def test_run_mshqc_hybrid_v2_streams_structured_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class StubSCF:
+        energy_total: float = -76.02100000
+        converged: bool = True
+        C_alpha: object = None
+        C_beta: object = None
+        n_occ_alpha: int = 5
+        n_occ_beta: int = 5
+
+    @dataclass
+    class StubOMP:
+        energy_total: float = -76.24567890
+        converged: bool = True
+
+    class StubMol:
+        def nuclear_repulsion_energy(self) -> float:
+            return 9.19012345
+
+    captured_kwargs: dict[str, object] = {}
+
+    class StubCalculator:
+        def __init__(self, **kwargs: object) -> None:
+            captured_kwargs.update(kwargs)
+            self.molecule = StubMol()
+            self.basis = object()
+            self.eri_method = str(kwargs.get("eri_method", "df"))
+            self.threshold = 1e-9
+            self.n_alpha = 5
+            self.n_beta = 5
+            self.scf_res: object = None
+
+        def _get_h_core(self) -> object:
+            return "H"
+
+        def _get_s_ovlp(self) -> object:
+            return "S"
+
+        def _get_eri4(self) -> object:
+            return None
+
+        def _get_ao_3index_factor(self, _scf: object = None) -> object:
+            return "B_ao"
+
+    def fake_build_sad(_mol: object, _basis: object) -> object:
+        return "P_sad"
+
+    def fake_run_df_rhf(*_args: object, **kwargs: object) -> StubSCF:
+        cb = kwargs.get("callback")
+        if callable(cb):
+            cb({"iter": 1, "energy": -75.90000000})
+            cb({"iter": 2, "energy": -76.02100000})
+        return StubSCF()
+
+    def fake_run_df_omp_rhf(*_args: object, **kwargs: object) -> StubOMP:
+        cb = kwargs.get("callback")
+        if callable(cb):
+            cb({"iter": 0, "energy_total": -76.23000000})
+            cb({"iter": 1, "energy_total": -76.24567890})
+        return StubOMP()
+
+    fake_pkg = types.ModuleType("mshqc")
+    fake_pkg.__version__ = "1.0.4.post22"  # type: ignore[attr-defined]
+    fake_pkg.MSHQCCalculator = StubCalculator  # type: ignore[attr-defined]
+
+    fake_methods = types.ModuleType("mshqc.methods")
+    fake_scf_mod = types.ModuleType("mshqc.methods.scf_hybrid")
+    fake_scf_mod.build_sad_guess = fake_build_sad  # type: ignore[attr-defined]
+    fake_scf_mod.run_df_rhf = fake_run_df_rhf  # type: ignore[attr-defined]
+    fake_scf_mod.run_df_uhf = fake_run_df_rhf  # type: ignore[attr-defined]
+    fake_scf_mod.run_df_rohf = fake_run_df_rhf  # type: ignore[attr-defined]
+
+    fake_omp_mod = types.ModuleType("mshqc.methods.omp_hybrid")
+    fake_omp_mod.run_df_omp_rhf = fake_run_df_omp_rhf  # type: ignore[attr-defined]
+    fake_omp_mod.run_df_omp_uhf = fake_run_df_omp_rhf  # type: ignore[attr-defined]
+
+    fake_pkg.methods = fake_methods  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "mshqc", fake_pkg)
+    monkeypatch.setitem(sys.modules, "mshqc.methods", fake_methods)
+    monkeypatch.setitem(sys.modules, "mshqc.methods.scf_hybrid", fake_scf_mod)
+    monkeypatch.setitem(sys.modules, "mshqc.methods.omp_hybrid", fake_omp_mod)
+
+    streamed: list[IterationRecord] = []
+    atoms = parse_xyz("O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0")
+    res = run_mshqc(
+        atoms=atoms,
+        method="SCS-OMP2",
+        basis="cc-pvdz",
+        charge=0,
+        multiplicity=1,
+        nuclear_repulsion_hartree=9.19,
+        on_iteration=streamed.append,
+    )
+
+    assert res is not None
+    assert res.engine == "mshqc-1.0.4.post22-hybrid-v2"
+    assert captured_kwargs["units"] == "angstrom"
+    assert captured_kwargs["basis_name"] == "cc-pVDZ"
+    assert res.total_energy_hartree == pytest.approx(-76.24567890)
+    assert len(streamed) == 4
+    assert [pt.iteration for pt in streamed] == [1, 2, 3, 4]

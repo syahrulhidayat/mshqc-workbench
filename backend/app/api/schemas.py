@@ -5,7 +5,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-AllowedMethod = Literal["RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3"]
+AllowedMethod = Literal[
+    "RHF",
+    "UHF",
+    "ROHF",
+    "RMP2",
+    "UMP2",
+    "ROMP2",
+    "RMP3",
+    "UMP3",
+    "OMP2",
+    "SCS-OMP2",
+    "SOS-OMP2",
+    "LT-SOS-OMP2",
+    "OMP2.5",
+    "OMP3",
+    "KAPPA-OMP2",
+]
 AllowedBasis = Literal["sto-3g", "6-31g", "cc-pvdz", "cc-pvtz"]
 
 

@@ -9,6 +9,7 @@ from app.domain.geometry import ATOMIC_NUMBERS, Atom
 from app.domain.mshqc_adapter import (
     IterationRecord,
     SolveResult,
+    detect_mshqc_engine_label,
     detect_mshqc_version,
     run_mshqc,
 )
@@ -25,7 +26,23 @@ __all__ = [
 ]
 
 BOHR_PER_ANGSTROM = 1.8897261246257702
-SUPPORTED_METHODS: tuple[str, ...] = ("RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3")
+SUPPORTED_METHODS: tuple[str, ...] = (
+    "RHF",
+    "UHF",
+    "ROHF",
+    "RMP2",
+    "UMP2",
+    "ROMP2",
+    "RMP3",
+    "UMP3",
+    "OMP2",
+    "SCS-OMP2",
+    "SOS-OMP2",
+    "LT-SOS-OMP2",
+    "OMP2.5",
+    "OMP3",
+    "KAPPA-OMP2",
+)
 SUPPORTED_BASIS_SETS: tuple[str, ...] = ("sto-3g", "6-31g", "cc-pvdz", "cc-pvtz")
 
 
@@ -40,11 +57,12 @@ class SolverCapabilities:
 
 def get_capabilities(backend_preference: str = "auto") -> SolverCapabilities:
     version = detect_mshqc_version()
+    engine_label = detect_mshqc_engine_label()
     installed = version is not None
     if backend_preference == "surrogate":
         active = "surrogate-deterministic"
-    elif installed:
-        active = f"mshqc-{version}"
+    elif installed and engine_label is not None:
+        active = engine_label
     elif backend_preference == "mshqc":
         active = "mshqc-unavailable"
     else:
@@ -87,10 +105,19 @@ def _run_deterministic_surrogate(
     method_shift = {
         "RHF": 0.0,
         "UHF": -0.015,
+        "ROHF": -0.008,
         "RMP2": -0.214,
         "UMP2": -0.219,
+        "ROMP2": -0.216,
+        "RMP3": -0.232,
+        "UMP3": -0.236,
         "OMP2": -0.228,
+        "SCS-OMP2": -0.221,
+        "SOS-OMP2": -0.218,
+        "LT-SOS-OMP2": -0.218,
+        "OMP2.5": -0.235,
         "OMP3": -0.241,
+        "KAPPA-OMP2": -0.225,
     }.get(method, -0.05)
     basis_shift = {
         "sto-3g": 0.45,
@@ -105,7 +132,7 @@ def _run_deterministic_surrogate(
     for step in range(1, 11):
         if step_delay_s > 0:
             time.sleep(step_delay_s)
-        residual = 1.25 * (0.28 ** step)
+        residual = 1.25 * (0.28**step)
         current_e = target_energy + residual
         delta_e = current_e - prev_e
         prev_e = current_e
