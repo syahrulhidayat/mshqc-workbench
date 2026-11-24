@@ -15,7 +15,7 @@ import {
 import { ConvergenceChart } from "./components/ConvergenceChart";
 import { MoleculeViewer3D } from "./components/MoleculeViewer3D";
 
-const DEFAULT_METHODS: MethodOption[] = ["RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3"];
+const DEFAULT_METHODS: MethodOption[] = ["RHF", "UHF", "ROHF", "RMP2", "UMP2", "ROMP2", "RMP3", "UMP3", "OMP2", "SCS-OMP2", "SOS-OMP2", "LT-SOS-OMP2", "OMP2.5", "OMP3", "KAPPA-OMP2"];
 const DEFAULT_BASIS_SETS: BasisOption[] = ["sto-3g", "6-31g", "cc-pvdz", "cc-pvtz"];
 
 const PRESETS: Record<string, string> = {
