@@ -14,9 +14,10 @@ from app.api.rate_limit import check_rate_limit
 from app.api.schemas import CapabilitiesResponse, JobCreateRequest, JobResponse
 from app.config import Settings, load_settings
 from app.db.repository import JobRepository, JobRow
+from app.domain.basis_catalog import normalize_and_validate_basis
 from app.domain.geometry import parse_xyz, validate_spin_parity
 from app.domain.hashing import canonical_job_hash
-from app.domain.solver import get_capabilities
+from app.domain.solver import active_engine_family, get_capabilities
 
 
 def _serialize_job(row: JobRow, *, cache_hit: bool = False) -> JobResponse:
@@ -28,6 +29,8 @@ def _serialize_job(row: JobRow, *, cache_hit: bool = False) -> JobResponse:
         basis=row.basis,
         charge=row.charge,
         multiplicity=row.multiplicity,
+        eri_method=row.eri_method,
+        freeze_core=row.freeze_core,
         geometry_xyz=row.geometry_xyz,
         engine=row.engine,
         result=row.result_json,
@@ -72,7 +75,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if application.state.owns_repo:
                 application.state.repo.close()
 
-    app = FastAPI(title="mshqc-workbench API", version="0.2.0", lifespan=lifespan)
+    app = FastAPI(title="mshqc-workbench API", version="0.3.0", lifespan=lifespan)
     app.state.settings = cfg
 
     app.add_middleware(
@@ -100,6 +103,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             mshqc_version=caps.mshqc_version,
             methods=list(caps.methods),
             basis_sets=list(caps.basis_sets),
+            ri_basis_sets=list(caps.ri_basis_sets),
+            eri_methods=list(caps.eri_methods),
+            basis_dir=caps.basis_dir,
+            discovered_basis_count=caps.discovered_basis_count,
         )
 
     @app.post("/api/v1/jobs", response_model=JobResponse)
@@ -131,6 +138,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             atoms = parse_xyz(payload.geometry_xyz)
             validate_spin_parity(atoms, payload.charge, payload.multiplicity)
+            canonical_basis = normalize_and_validate_basis(payload.basis)
         except ValueError as exc:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -140,21 +148,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         normalized_xyz = "\n".join(
             f"{a.symbol} {a.x:.8f} {a.y:.8f} {a.z:.8f}" for a in atoms
         )
+        engine_family = active_engine_family(cfg.solver_backend)
         input_hash = canonical_job_hash(
             atoms=atoms,
             method=payload.method,
-            basis=payload.basis,
+            basis=canonical_basis,
             charge=payload.charge,
             multiplicity=payload.multiplicity,
+            eri_method=payload.eri_method,
+            freeze_core=payload.freeze_core,
+            engine_family=engine_family,
         )
 
         row, cache_hit = await asyncio.to_thread(
             request.app.state.repo.create_or_get_by_hash,
             input_hash=input_hash,
             method=payload.method,
-            basis=payload.basis,
+            basis=canonical_basis,
             charge=payload.charge,
             multiplicity=payload.multiplicity,
+            eri_method=payload.eri_method,
+            freeze_core=payload.freeze_core,
             geometry_xyz=normalized_xyz,
         )
 

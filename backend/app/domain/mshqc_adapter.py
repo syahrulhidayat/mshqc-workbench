@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from typing import Any
 
+from app.domain.basis_catalog import discover_basis_catalog
 from app.domain.geometry import Atom
 
 _KV_ITER_RE = re.compile(
@@ -25,13 +26,6 @@ _TABULAR_ITER_RE = re.compile(
     r"([-+]?\d+\.\d{4,})\s+"
     r"([-+]?\d+(?:\.\d+)?[eE][-+]?\d+|[-+]?\d+\.\d{4,})\b"
 )
-
-_BASIS_CANONICAL: dict[str, str] = {
-    "sto-3g": "STO-3G",
-    "6-31g": "6-31G",
-    "cc-pvdz": "cc-pVDZ",
-    "cc-pvtz": "cc-pVTZ",
-}
 
 _OMP_STANDARD_PARAMS: dict[str, tuple[str, float, float, float]] = {
     "omp2": ("omp2", 1.0, 1.0, 0.0),
@@ -48,6 +42,7 @@ class IterationRecord:
     energy_hartree: float
     delta_e: float
     elapsed_ms: float
+    stage: str = "scf"
 
 
 @dataclass(frozen=True)
@@ -58,8 +53,16 @@ class SolveResult:
     nuclear_repulsion_hartree: float
     total_energy_hartree: float
     converged: bool
-    iterations: list[dict[str, float | int]]
+    iterations: list[dict[str, float | int | str]]
     wall_time_ms: float
+    energy_scf_hartree: float | None = None
+    energy_corr_hartree: float | None = None
+    energy_mp2_hartree: float | None = None
+    energy_mp3_hartree: float | None = None
+    s2: float | None = None
+    n_basis_functions: int | None = None
+    eri_method: str = "auto"
+    n_frozen: int = 0
 
 
 def detect_mshqc_version() -> str | None:
@@ -106,6 +109,7 @@ def parse_iteration_line(line: str, *, elapsed_ms: float) -> IterationRecord | N
             energy_hartree=round(energy, 10),
             delta_e=round(delta_e, 10),
             elapsed_ms=round(elapsed_ms, 2),
+            stage="scf",
         )
 
     tab_match = _TABULAR_ITER_RE.match(line)
@@ -118,6 +122,7 @@ def parse_iteration_line(line: str, *, elapsed_ms: float) -> IterationRecord | N
             energy_hartree=round(energy, 10),
             delta_e=round(delta_e, 10),
             elapsed_ms=round(elapsed_ms, 2),
+            stage="scf",
         )
 
     return None
@@ -172,6 +177,14 @@ def _extract_energy(raw_result: Any) -> float:
     raise TypeError(f"Unsupported mshqc return value type: {type(raw_result).__name__}")
 
 
+def _opt_float(obj: Any, *attrs: str) -> float | None:
+    for attr in attrs:
+        val = getattr(obj, attr, None)
+        if isinstance(val, (int, float)):
+            return round(float(val), 10)
+    return None
+
+
 def _resolve_reference(method_low: str, multiplicity: int) -> str:
     if method_low in ("rhf", "rmp2", "rmp3"):
         return "rhf"
@@ -182,11 +195,17 @@ def _resolve_reference(method_low: str, multiplicity: int) -> str:
     return "rhf" if multiplicity == 1 else "uhf"
 
 
-def _candidate_eri_modes(basis_low: str) -> list[str]:
+def _candidate_eri_modes(basis_low: str, requested_eri: str) -> list[str]:
+    req = requested_eri.strip().lower()
+    if req in ("df", "cholesky", "exact"):
+        return [req]
+
     env_mode = os.getenv("MSHQC_ERI_METHOD", "auto").strip().lower()
     if env_mode in ("df", "cholesky", "exact"):
         return [env_mode]
-    if basis_low.startswith(("cc-p", "aug-cc-p", "def2-")):
+
+    catalog = discover_basis_catalog()
+    if basis_low in catalog.ri_supported:
         return ["df", "cholesky", "exact"]
     return ["cholesky", "exact", "df"]
 
@@ -199,36 +218,34 @@ def _build_hybrid_calculator(
     charge: int,
     multiplicity: int,
     reference: str,
+    eri_method: str,
+    freeze_core: bool,
 ) -> Any:
     basis_low = basis.strip().lower()
-    basis_candidates = [_BASIS_CANONICAL.get(basis_low, basis)]
-    if basis_low not in basis_candidates:
-        basis_candidates.append(basis_low)
-
-    basis_dir = os.getenv("MSHQC_BASIS_PATH", "").strip() or None
+    catalog = discover_basis_catalog()
+    basis_dir = catalog.basis_dir or os.getenv("MSHQC_BASIS_PATH", "").strip() or None
     last_exc: Exception | None = None
 
-    for eri_mode in _candidate_eri_modes(basis_low):
-        for bname in basis_candidates:
-            try:
-                calc = mshqc_mod.MSHQCCalculator(
-                    molecule=atom_tuples,
-                    basis_name=bname,
-                    eri_method=eri_mode,
-                    charge=charge,
-                    multiplicity=multiplicity,
-                    units="angstrom",
-                    reference=reference,
-                    print_level=0,
-                    basis_dir=basis_dir,
-                )
-                # Eagerly verify 3-index / aux basis availability when DF is selected.
-                if eri_mode == "df":
-                    calc._get_ao_3index_factor(None)
-                return calc
-            except Exception as exc:
-                last_exc = exc
-                continue
+    for eri_mode in _candidate_eri_modes(basis_low, eri_method):
+        try:
+            calc = mshqc_mod.MSHQCCalculator(
+                molecule=atom_tuples,
+                basis_name=basis_low,
+                eri_method=eri_mode,
+                charge=charge,
+                multiplicity=multiplicity,
+                units="angstrom",
+                reference=reference,
+                freeze_core=freeze_core,
+                print_level=0,
+                basis_dir=basis_dir,
+            )
+            if eri_mode == "df":
+                calc._get_ao_3index_factor(None)
+            return calc
+        except Exception as exc:
+            last_exc = exc
+            continue
 
     if last_exc is not None:
         raise last_exc
@@ -243,6 +260,8 @@ def _run_mshqc_hybrid_v2(
     basis: str,
     charge: int,
     multiplicity: int,
+    eri_method: str,
+    freeze_core: bool,
     nuclear_repulsion_hartree: float,
     on_iteration: Callable[[IterationRecord], None] | None,
 ) -> SolveResult:
@@ -262,33 +281,30 @@ def _run_mshqc_hybrid_v2(
     records: list[IterationRecord] = []
     prev_energy: float | None = None
 
-    def emit_point(energy_val: float, raw_de: float | None = None) -> None:
+    def emit_point(energy_val: float, stage: str = "scf") -> None:
         nonlocal prev_energy
         step = len(records) + 1
-        delta_e = (
-            float(raw_de)
-            if raw_de is not None and prev_energy is None
-            else (0.0 if prev_energy is None else energy_val - prev_energy)
-        )
+        delta_e = 0.0 if prev_energy is None else energy_val - prev_energy
         prev_energy = energy_val
         rec = IterationRecord(
             iteration=step,
             energy_hartree=round(energy_val, 10),
             delta_e=round(delta_e, 10),
             elapsed_ms=round((time.perf_counter() - t0) * 1000.0, 2),
+            stage=stage,
         )
         records.append(rec)
         if on_iteration is not None:
             on_iteration(rec)
 
     def scf_cb(info: dict[str, Any]) -> None:
-        emit_point(float(info["energy"]))
+        emit_point(float(info["energy"]), stage="scf")
 
     def omp_cb(info: dict[str, Any]) -> None:
         energy_val = info.get("energy_total")
         if energy_val is None:
             energy_val = info["energy"]
-        emit_point(float(energy_val))
+        emit_point(float(energy_val), stage="omp")
 
     calc = _build_hybrid_calculator(
         mshqc_mod,
@@ -297,11 +313,15 @@ def _run_mshqc_hybrid_v2(
         charge=charge,
         multiplicity=multiplicity,
         reference=reference,
+        eri_method=eri_method,
+        freeze_core=freeze_core,
     )
 
     H_core = calc._get_h_core()
     S_ovlp = calc._get_s_ovlp()
     v_nn = float(calc.molecule.nuclear_repulsion_energy())
+    n_bf = int(calc.basis.n_basis_functions()) if hasattr(calc.basis, "n_basis_functions") else None
+    n_frozen = int(getattr(calc, "n_frozen", 0))
     P_sad = build_sad_guess(calc.molecule, calc.basis)
     eri4_arg = calc._get_eri4() if calc.eri_method == "exact" else None
     B_ao = None if eri4_arg is not None else calc._get_ao_3index_factor(None)
@@ -349,6 +369,7 @@ def _run_mshqc_hybrid_v2(
         )
 
     calc.scf_res = scf_res
+    e_scf = _extract_energy(scf_res)
 
     if m_low in ("scf", "hf", "rhf", "uhf", "rohf"):
         final_res: Any = scf_res
@@ -367,6 +388,7 @@ def _run_mshqc_hybrid_v2(
                 c_ss=c_ss,
                 lam_mp3=lam_mp3,
                 energy_tol=calc.threshold,
+                n_frozen=n_frozen,
                 callback=omp_cb,
                 eri4=eri4_arg,
             )
@@ -385,28 +407,97 @@ def _run_mshqc_hybrid_v2(
                 c_ss=c_ss,
                 lam_mp3=lam_mp3,
                 energy_tol=calc.threshold,
+                n_frozen=n_frozen,
                 callback=omp_cb,
                 eri4=eri4_arg,
             )
+    elif m_low in ("lt-sos-omp2", "lt-sos-oomp2"):
+        from mshqc.methods.lt_sos_omp2 import (  # type: ignore
+            run_df_lt_sos_omp2_rhf,
+            run_df_lt_sos_omp2_uhf,
+        )
+
+        B_corr = calc._get_ao_3index_factor(scf_res)
+        if reference == "rhf":
+            final_res = run_df_lt_sos_omp2_rhf(
+                H_core,
+                v_nn,
+                B_corr,
+                scf_res.C_alpha,
+                scf_res.n_occ_alpha,
+                energy_tol=calc.threshold,
+                n_frozen=n_frozen,
+                callback=omp_cb,
+            )
+        else:
+            final_res = run_df_lt_sos_omp2_uhf(
+                H_core,
+                S_ovlp,
+                v_nn,
+                B_corr,
+                scf_res.C_alpha,
+                scf_res.C_beta,
+                scf_res.n_occ_alpha,
+                scf_res.n_occ_beta,
+                energy_tol=calc.threshold,
+                n_frozen=n_frozen,
+                callback=omp_cb,
+            )
+    elif m_low in ("kappa-omp2", "k-omp2"):
+        from mshqc.methods.kappa_omp2 import (  # type: ignore
+            run_df_kappa_omp2_rhf,
+            run_df_kappa_omp2_uhf,
+        )
+
+        B_corr = calc._get_ao_3index_factor(scf_res)
+        if reference == "rhf":
+            final_res = run_df_kappa_omp2_rhf(
+                H_core,
+                v_nn,
+                B_corr,
+                scf_res.C_alpha,
+                scf_res.n_occ_alpha,
+                energy_tol=calc.threshold,
+                n_frozen=n_frozen,
+                callback=omp_cb,
+            )
+        else:
+            final_res = run_df_kappa_omp2_uhf(
+                H_core,
+                S_ovlp,
+                v_nn,
+                B_corr,
+                scf_res.C_alpha,
+                scf_res.C_beta,
+                scf_res.n_occ_alpha,
+                scf_res.n_occ_beta,
+                energy_tol=calc.threshold,
+                n_frozen=n_frozen,
+                callback=omp_cb,
+            )
     elif m_low in ("mp2", "rmp2", "ump2", "romp2"):
         final_res = calc.run_mp2(scf_res=scf_res)
-        emit_point(_extract_energy(final_res))
+        emit_point(_extract_energy(final_res), stage="mp2")
     elif m_low in ("mp3", "rmp3", "ump3", "romp3"):
         final_res = calc.run_mp3(scf_res=scf_res)
-        emit_point(_extract_energy(final_res))
-    elif m_low in ("lt-sos-omp2", "lt-sos-oomp2"):
-        final_res = calc.run_lt_sos_omp2(scf_res=scf_res)
-        emit_point(_extract_energy(final_res))
-    elif m_low in ("kappa-omp2", "k-omp2"):
-        final_res = calc.run_kappa_omp2(scf_res=scf_res)
-        emit_point(_extract_energy(final_res))
+        emit_point(_extract_energy(final_res), stage="mp3")
     else:
         raise ValueError(f"Unsupported mshqc hybrid-v2 method: {method}")
 
     energy = _extract_energy(final_res)
     wall_ms = (time.perf_counter() - t0) * 1000.0
     if not records:
-        emit_point(energy)
+        emit_point(energy, stage="scf")
+
+    e_scf_final = _opt_float(final_res, "energy_scf", "e_hf") or round(e_scf, 10)
+    e_mp2 = _opt_float(final_res, "energy_mp2_corr", "e_mp2")
+    e_mp3 = _opt_float(final_res, "energy_mp3_corr", "e_mp3")
+    e_corr = _opt_float(final_res, "e_corr_total")
+    if e_corr is None and m_low not in ("scf", "hf", "rhf", "uhf", "rohf"):
+        e_corr = round(energy - e_scf_final, 10)
+    s2_val = _opt_float(final_res, "s2")
+    if s2_val is None:
+        s2_val = _opt_float(scf_res, "s2")
 
     version = detect_mshqc_version() or "installed"
     return SolveResult(
@@ -418,6 +509,14 @@ def _run_mshqc_hybrid_v2(
         converged=bool(getattr(final_res, "converged", True)),
         iterations=[asdict(rec) for rec in records],
         wall_time_ms=round(wall_ms, 2),
+        energy_scf_hartree=e_scf_final,
+        energy_corr_hartree=e_corr if e_corr is not None else 0.0,
+        energy_mp2_hartree=e_mp2,
+        energy_mp3_hartree=e_mp3,
+        s2=s2_val,
+        n_basis_functions=n_bf,
+        eri_method=str(getattr(calc, "eri_method", eri_method)),
+        n_frozen=n_frozen,
     )
 
 
@@ -430,6 +529,8 @@ def run_mshqc(
     multiplicity: int,
     nuclear_repulsion_hartree: float,
     on_iteration: Callable[[IterationRecord], None] | None,
+    eri_method: str = "auto",
+    freeze_core: bool = False,
 ) -> SolveResult | None:
     try:
         import mshqc  # type: ignore[import-not-found]
@@ -444,6 +545,8 @@ def run_mshqc(
             basis=basis,
             charge=charge,
             multiplicity=multiplicity,
+            eri_method=eri_method,
+            freeze_core=freeze_core,
             nuclear_repulsion_hartree=nuclear_repulsion_hartree,
             on_iteration=on_iteration,
         )
@@ -458,15 +561,15 @@ def run_mshqc(
 
     if run_fn is not None and "molecule" in inspect.signature(run_fn).parameters:
         atom_tuples = [(a.symbol, float(a.x), float(a.y), float(a.z)) for a in atoms]
-        bname = _BASIS_CANONICAL.get(basis.strip().lower(), basis)
         with contextlib.redirect_stdout(interceptor):
             raw_out = run_fn(
                 molecule=atom_tuples,
                 method=method.lower(),
-                basis=bname,
+                basis=basis.lower(),
                 charge=charge,
                 multiplicity=multiplicity,
                 units="angstrom",
+                freeze_core=freeze_core,
                 print_level=1,
             )
             interceptor.flush()
@@ -488,6 +591,7 @@ def run_mshqc(
             energy_hartree=round(energy, 10),
             delta_e=0.0,
             elapsed_ms=round(wall_ms, 2),
+            stage="scf",
         )
         if on_iteration is not None:
             on_iteration(final_rec)
@@ -503,4 +607,8 @@ def run_mshqc(
         converged=bool(getattr(raw_out, "converged", True)),
         iterations=[asdict(rec) for rec in records],
         wall_time_ms=round(wall_ms, 2),
+        energy_scf_hartree=_opt_float(raw_out, "energy_scf", "e_hf"),
+        energy_corr_hartree=_opt_float(raw_out, "e_corr_total"),
+        eri_method=eri_method,
+        n_frozen=0,
     )

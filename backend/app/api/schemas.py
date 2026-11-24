@@ -14,6 +14,7 @@ AllowedMethod = Literal[
     "ROMP2",
     "RMP3",
     "UMP3",
+    "ROMP3",
     "OMP2",
     "SCS-OMP2",
     "SOS-OMP2",
@@ -22,15 +23,17 @@ AllowedMethod = Literal[
     "OMP3",
     "KAPPA-OMP2",
 ]
-AllowedBasis = Literal["sto-3g", "6-31g", "cc-pvdz", "cc-pvtz"]
+AllowedEriMethod = Literal["auto", "df", "cholesky", "exact"]
 
 
 class JobCreateRequest(BaseModel):
     geometry_xyz: str = Field(..., min_length=5, max_length=16000)
     method: AllowedMethod = "RHF"
-    basis: AllowedBasis = "cc-pvdz"
+    basis: str = Field(default="cc-pvdz", min_length=2, max_length=64)
     charge: int = Field(default=0, ge=-4, le=4)
-    multiplicity: int = Field(default=1, ge=1, le=5)
+    multiplicity: int = Field(default=1, ge=1, le=7)
+    eri_method: AllowedEriMethod = "auto"
+    freeze_core: bool = False
 
 
 class JobResponse(BaseModel):
@@ -41,6 +44,8 @@ class JobResponse(BaseModel):
     basis: str
     charge: int
     multiplicity: int
+    eri_method: str = "auto"
+    freeze_core: bool = False
     geometry_xyz: str
     engine: str | None = None
     result: dict[str, Any] | None = None
@@ -56,3 +61,7 @@ class CapabilitiesResponse(BaseModel):
     mshqc_version: str | None = None
     methods: list[str]
     basis_sets: list[str]
+    ri_basis_sets: list[str]
+    eri_methods: list[str]
+    basis_dir: str | None = None
+    discovered_basis_count: int = 0

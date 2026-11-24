@@ -58,6 +58,8 @@ def process_job(
             basis=job.basis,
             charge=job.charge,
             multiplicity=job.multiplicity,
+            eri_method=job.eri_method,
+            freeze_core=job.freeze_core,
             backend_preference=solver_backend,
             on_iteration=publish_iteration,
         )
@@ -82,9 +84,12 @@ def process_job(
             ),
         )
         logger.info(
-            "Completed job %s via %s in %.2f ms.",
+            "Completed job %s via %s (%s/%s, eri=%s) in %.2f ms.",
             job_id,
             result.engine,
+            job.method,
+            job.basis,
+            result.eri_method,
             result.wall_time_ms,
         )
     except Exception as exc:

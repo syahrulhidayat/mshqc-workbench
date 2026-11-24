@@ -28,6 +28,8 @@ class InMemoryControlRepo:
         charge: int,
         multiplicity: int,
         geometry_xyz: str,
+        eri_method: str = "auto",
+        freeze_core: bool = False,
     ) -> tuple[JobRow, bool]:
         if input_hash in self._by_hash:
             return self._by_id[self._by_hash[input_hash]], True
@@ -46,6 +48,8 @@ class InMemoryControlRepo:
             error_message=None,
             created_at=now,
             updated_at=now,
+            eri_method=eri_method,
+            freeze_core=freeze_core,
         )
         self._by_id[row.id] = row
         self._by_hash[input_hash] = row.id

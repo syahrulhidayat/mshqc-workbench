@@ -26,6 +26,8 @@ class FakeRepo:
         charge: int,
         multiplicity: int,
         geometry_xyz: str,
+        eri_method: str = "auto",
+        freeze_core: bool = False,
     ) -> tuple[JobRow, bool]:
         if input_hash in self._by_hash:
             return self._by_id[self._by_hash[input_hash]], True
@@ -44,6 +46,8 @@ class FakeRepo:
             error_message=None,
             created_at=now,
             updated_at=now,
+            eri_method=eri_method,
+            freeze_core=freeze_core,
         )
         self._by_id[row.id] = row
         self._by_hash[input_hash] = row.id
@@ -114,14 +118,58 @@ def test_submit_job_deduplicates_equivalent_geometries() -> None:
         assert len(fake_redis.pushed) == 1
 
 
-def test_submit_job_rejects_invalid_geometry() -> None:
+def test_submit_job_separates_cache_on_eri_and_freeze_core() -> None:
+    app = create_app()
+    fake_repo = FakeRepo()
+    fake_redis = FakeRedis()
+    app.state.repo = fake_repo
+    app.state.redis = fake_redis
+
+    geom = "O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0"
+    with TestClient(app) as client:
+        r_df = client.post(
+            "/api/v1/jobs",
+            json={"geometry_xyz": geom, "method": "OMP2", "basis": "cc-pvdz", "eri_method": "df"},
+        )
+        r_exact = client.post(
+            "/api/v1/jobs",
+            json={
+                "geometry_xyz": geom,
+                "method": "OMP2",
+                "basis": "cc-pvdz",
+                "eri_method": "exact",
+            },
+        )
+        r_fc = client.post(
+            "/api/v1/jobs",
+            json={
+                "geometry_xyz": geom,
+                "method": "OMP2",
+                "basis": "cc-pvdz",
+                "eri_method": "df",
+                "freeze_core": True,
+            },
+        )
+        assert r_df.status_code == 201
+        assert r_exact.status_code == 201
+        assert r_fc.status_code == 201
+        assert len({r_df.json()["id"], r_exact.json()["id"], r_fc.json()["id"]}) == 3
+
+
+def test_submit_job_rejects_invalid_geometry_and_basis() -> None:
     app = create_app()
     app.state.repo = FakeRepo()
     app.state.redis = FakeRedis()
 
     with TestClient(app) as client:
-        resp = client.post(
+        bad_geom = client.post(
             "/api/v1/jobs",
             json={"geometry_xyz": "Xx 0 0 0", "method": "RHF", "basis": "sto-3g"},
         )
-        assert resp.status_code == 422
+        assert bad_geom.status_code == 422
+
+        bad_basis = client.post(
+            "/api/v1/jobs",
+            json={"geometry_xyz": "H 0 0 0\nH 0 0 0.74", "method": "RHF", "basis": "../etc/passwd"},
+        )
+        assert bad_basis.status_code == 422

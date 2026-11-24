@@ -28,6 +28,8 @@ class JobRow:
     error_message: str | None
     created_at: datetime
     updated_at: datetime
+    eri_method: str = "auto"
+    freeze_core: bool = False
 
 
 class JobRepository:
@@ -63,12 +65,15 @@ class JobRepository:
         charge: int,
         multiplicity: int,
         geometry_xyz: str,
+        eri_method: str = "auto",
+        freeze_core: bool = False,
     ) -> tuple[JobRow, bool]:
         new_id = str(uuid.uuid4())
         insert_sql = (
             "INSERT INTO compute_jobs "
-            "(id, input_hash, status, method, basis, charge, multiplicity, geometry_xyz) "
-            "VALUES (%s, %s, 'queued', %s, %s, %s, %s, %s) "
+            "(id, input_hash, status, method, basis, charge, multiplicity, "
+            "eri_method, freeze_core, geometry_xyz) "
+            "VALUES (%s, %s, 'queued', %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (input_hash) DO NOTHING "
             "RETURNING *"
         )
@@ -77,7 +82,17 @@ class JobRepository:
         with self._pool.connection() as conn:
             inserted = conn.execute(
                 insert_sql,
-                (new_id, input_hash, method, basis, charge, multiplicity, geometry_xyz),
+                (
+                    new_id,
+                    input_hash,
+                    method,
+                    basis,
+                    charge,
+                    multiplicity,
+                    eri_method,
+                    freeze_core,
+                    geometry_xyz,
+                ),
             ).fetchone()
             conn.commit()
             if inserted is not None:
@@ -175,4 +190,6 @@ def _to_job_row(raw: dict[str, Any]) -> JobRow:
         error_message=raw["error_message"],
         created_at=raw["created_at"],
         updated_at=raw["updated_at"],
+        eri_method=str(raw.get("eri_method") or "auto"),
+        freeze_core=bool(raw.get("freeze_core", False)),
     )

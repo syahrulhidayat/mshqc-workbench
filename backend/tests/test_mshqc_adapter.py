@@ -182,7 +182,124 @@ def test_run_mshqc_hybrid_v2_streams_structured_callbacks(
     assert res is not None
     assert res.engine == "mshqc-1.0.4.post22-hybrid-v2"
     assert captured_kwargs["units"] == "angstrom"
-    assert captured_kwargs["basis_name"] == "cc-pVDZ"
+    assert captured_kwargs["basis_name"] == "cc-pvdz"
     assert res.total_energy_hartree == pytest.approx(-76.24567890)
     assert len(streamed) == 4
     assert [pt.iteration for pt in streamed] == [1, 2, 3, 4]
+
+
+def test_run_mshqc_hybrid_v2_lt_sos_omp2_streams_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import dataclass
+
+    @dataclass
+    class StubSCF:
+        energy_total: float = -76.02000000
+        converged: bool = True
+        s2: float = 0.0
+        C_alpha: object = None
+        C_beta: object = None
+        n_occ_alpha: int = 5
+        n_occ_beta: int = 5
+
+    @dataclass
+    class StubLT:
+        energy_scf: float = -76.02000000
+        energy_mp2_corr: float = -0.21800000
+        energy_total: float = -76.23800000
+        converged: bool = True
+        s2: float = 0.0
+
+    class StubMol:
+        def nuclear_repulsion_energy(self) -> float:
+            return 9.19000000
+
+    class StubBasis:
+        def n_basis_functions(self) -> int:
+            return 24
+
+    class StubCalc:
+        def __init__(self, **kwargs: object) -> None:
+            self.molecule = StubMol()
+            self.basis = StubBasis()
+            self.eri_method = str(kwargs.get("eri_method", "df"))
+            self.threshold = 1e-9
+            self.n_alpha = 5
+            self.n_beta = 5
+            self.n_frozen = 1 if kwargs.get("freeze_core") else 0
+            self.scf_res: object = None
+
+        def _get_h_core(self) -> object:
+            return "H"
+
+        def _get_s_ovlp(self) -> object:
+            return "S"
+
+        def _get_eri4(self) -> object:
+            return None
+
+        def _get_ao_3index_factor(self, _scf: object = None) -> object:
+            return "B_ao"
+
+    def fake_scf(*_args: object, **kwargs: object) -> StubSCF:
+        cb = kwargs.get("callback")
+        if callable(cb):
+            cb({"iter": 1, "energy": -76.02000000})
+        return StubSCF()
+
+    def fake_lt(*_args: object, **kwargs: object) -> StubLT:
+        cb = kwargs.get("callback")
+        assert kwargs.get("n_frozen") == 1
+        if callable(cb):
+            cb({"iter": 0, "energy_total": -76.23000000})
+            cb({"iter": 1, "energy_total": -76.23800000})
+        return StubLT()
+
+    fake_pkg = types.ModuleType("mshqc")
+    fake_pkg.__version__ = "1.0.4.post22"  # type: ignore[attr-defined]
+    fake_pkg.MSHQCCalculator = StubCalc  # type: ignore[attr-defined]
+    fake_methods = types.ModuleType("mshqc.methods")
+    fake_pkg.methods = fake_methods  # type: ignore[attr-defined]
+
+    fake_scf_mod = types.ModuleType("mshqc.methods.scf_hybrid")
+    fake_scf_mod.build_sad_guess = lambda _m, _b: "P"  # type: ignore[attr-defined]
+    fake_scf_mod.run_df_rhf = fake_scf  # type: ignore[attr-defined]
+    fake_scf_mod.run_df_uhf = fake_scf  # type: ignore[attr-defined]
+    fake_scf_mod.run_df_rohf = fake_scf  # type: ignore[attr-defined]
+
+    fake_omp_mod = types.ModuleType("mshqc.methods.omp_hybrid")
+    fake_omp_mod.run_df_omp_rhf = fake_lt  # type: ignore[attr-defined]
+    fake_omp_mod.run_df_omp_uhf = fake_lt  # type: ignore[attr-defined]
+
+    fake_lt_mod = types.ModuleType("mshqc.methods.lt_sos_omp2")
+    fake_lt_mod.run_df_lt_sos_omp2_rhf = fake_lt  # type: ignore[attr-defined]
+    fake_lt_mod.run_df_lt_sos_omp2_uhf = fake_lt  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "mshqc", fake_pkg)
+    monkeypatch.setitem(sys.modules, "mshqc.methods", fake_methods)
+    monkeypatch.setitem(sys.modules, "mshqc.methods.scf_hybrid", fake_scf_mod)
+    monkeypatch.setitem(sys.modules, "mshqc.methods.omp_hybrid", fake_omp_mod)
+    monkeypatch.setitem(sys.modules, "mshqc.methods.lt_sos_omp2", fake_lt_mod)
+
+    streamed: list[IterationRecord] = []
+    atoms = parse_xyz("O 0 0 0\nH 0.757 0.586 0\nH -0.757 0.586 0")
+    res = run_mshqc(
+        atoms=atoms,
+        method="LT-SOS-OMP2",
+        basis="cc-pvdz",
+        charge=0,
+        multiplicity=1,
+        eri_method="df",
+        freeze_core=True,
+        nuclear_repulsion_hartree=9.19,
+        on_iteration=streamed.append,
+    )
+
+    assert res is not None
+    assert res.n_basis_functions == 24
+    assert res.n_frozen == 1
+    assert res.energy_scf_hartree == pytest.approx(-76.02)
+    assert res.energy_corr_hartree == pytest.approx(-0.218)
+    assert [r.stage for r in streamed] == ["scf", "omp", "omp"]
+
