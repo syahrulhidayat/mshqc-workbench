@@ -1,0 +1,50 @@
+name: Benchmark Stack
+
+on:
+  workflow_dispatch:
+    inputs:
+      requests:
+        description: "Number of requests per phase"
+        required: false
+        default: "100"
+      concurrency:
+        description: "Concurrent workers"
+        required: false
+        default: "10"
+
+jobs:
+  benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install benchmark client
+        run: pip install httpx
+      - name: Boot full Docker Compose stack
+        run: |
+          cp .env.example .env
+          docker compose up --build -d
+          for i in $(seq 1 40); do
+            if curl -sf http://localhost:8000/healthz >/dev/null; then
+              echo "API healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs api worker
+          exit 1
+      - name: Run API and SHA-256 cache benchmark
+        run: |
+          python3 benchmarks/load_test.py \
+            --url http://localhost:8000 \
+            --requests "${{ inputs.requests || '100' }}" \
+            --concurrency "${{ inputs.concurrency || '10' }}" \
+            --update-readme README.md
+          echo "## Measured Benchmark Results" >> "$GITHUB_STEP_SUMMARY"
+          sed -n '/<!-- BENCHMARK_START -->/,/<!-- BENCHMARK_END -->/p' README.md \
+            >> "$GITHUB_STEP_SUMMARY"
+      - name: Tear down stack
+        if: always()
+        run: docker compose down -v

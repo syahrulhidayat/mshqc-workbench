@@ -37,6 +37,8 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       SOLVER_BACKEND: ${SOLVER_BACKEND:-auto}
+      RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-300}
+      RATE_LIMIT_WINDOW_S: ${RATE_LIMIT_WINDOW_S:-60}
     ports:
       - "8000:8000"
     depends_on:
