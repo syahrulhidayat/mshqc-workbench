@@ -10,11 +10,12 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from app.api.schemas import JobCreateRequest, JobResponse
+from app.api.schemas import CapabilitiesResponse, JobCreateRequest, JobResponse
 from app.config import Settings, load_settings
 from app.db.repository import JobRepository, JobRow
 from app.domain.geometry import parse_xyz, validate_spin_parity
 from app.domain.hashing import canonical_job_hash
+from app.domain.solver import get_capabilities
 
 
 def _serialize_job(row: JobRow, *, cache_hit: bool = False) -> JobResponse:
@@ -81,6 +82,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not (db_ok and redis_ok):
             raise HTTPException(status_code=503, detail="Backing service unavailable.")
         return {"status": "ok"}
+
+    @app.get("/api/v1/capabilities", response_model=CapabilitiesResponse)
+    async def capabilities() -> CapabilitiesResponse:
+        caps = get_capabilities(cfg.solver_backend)
+        return CapabilitiesResponse(
+            active_engine=caps.active_engine,
+            mshqc_installed=caps.mshqc_installed,
+            mshqc_version=caps.mshqc_version,
+            methods=list(caps.methods),
+            basis_sets=list(caps.basis_sets),
+        )
 
     @app.post("/api/v1/jobs", response_model=JobResponse)
     async def submit_job(
