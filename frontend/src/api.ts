@@ -1,5 +1,6 @@
 export type MethodOption = "RHF" | "UHF" | "RMP2" | "UMP2" | "OMP2" | "OMP3";
 export type BasisOption = "sto-3g" | "6-31g" | "cc-pvdz" | "cc-pvtz";
+export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Capabilities {
   active_engine: string;
@@ -30,7 +31,7 @@ export interface JobResult {
 export interface JobRecord {
   id: string;
   input_hash: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: JobStatus;
   method: MethodOption;
   basis: BasisOption;
   charge: number;
@@ -46,11 +47,14 @@ export interface JobRecord {
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
+async function parseError(res: Response, fallback: string): Promise<Error> {
+  const errBody = (await res.json().catch(() => ({}))) as { detail?: string };
+  return new Error(errBody.detail || fallback + " (" + res.status + ")");
+}
+
 export async function fetchCapabilities(): Promise<Capabilities> {
   const res = await fetch(API_BASE + "/api/v1/capabilities");
-  if (!res.ok) {
-    throw new Error("Failed to fetch capabilities (" + res.status + ")");
-  }
+  if (!res.ok) throw await parseError(res, "Failed to fetch capabilities");
   return (await res.json()) as Capabilities;
 }
 
@@ -66,19 +70,25 @@ export async function submitJob(payload: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
   });
+  if (!res.ok) throw await parseError(res, "Request failed");
+  return (await res.json()) as JobRecord;
+}
 
-  if (!res.ok) {
-    const errBody = (await res.json().catch(() => ({}))) as { detail?: string };
-    throw new Error(errBody.detail || "Request failed (" + res.status + ")");
-  }
+export async function cancelJob(jobId: string): Promise<JobRecord> {
+  const res = await fetch(API_BASE + "/api/v1/jobs/" + jobId + "/cancel", { method: "POST" });
+  if (!res.ok) throw await parseError(res, "Cancel failed");
+  return (await res.json()) as JobRecord;
+}
+
+export async function retryJob(jobId: string): Promise<JobRecord> {
+  const res = await fetch(API_BASE + "/api/v1/jobs/" + jobId + "/retry", { method: "POST" });
+  if (!res.ok) throw await parseError(res, "Retry failed");
   return (await res.json()) as JobRecord;
 }
 
 export async function fetchJobs(): Promise<JobRecord[]> {
   const res = await fetch(API_BASE + "/api/v1/jobs?limit=20");
-  if (!res.ok) {
-    throw new Error("Failed to fetch job history (" + res.status + ")");
-  }
+  if (!res.ok) throw await parseError(res, "Failed to fetch job history");
   return (await res.json()) as JobRecord[];
 }
 
@@ -87,7 +97,7 @@ export function subscribeJobEvents(
   handlers: {
     onIteration: (point: IterationPoint) => void;
     onDone: (payload: {
-      status: JobRecord["status"];
+      status: JobStatus;
       engine: string | null;
       result: JobResult | null;
       error_message: string | null;

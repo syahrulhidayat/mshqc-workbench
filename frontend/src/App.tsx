@@ -1,16 +1,19 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   type BasisOption,
+  cancelJob,
   type Capabilities,
   fetchCapabilities,
   fetchJobs,
   type IterationPoint,
   type JobRecord,
   type MethodOption,
+  retryJob,
   submitJob,
   subscribeJobEvents
 } from "./api";
 import { ConvergenceChart } from "./components/ConvergenceChart";
+import { MoleculeViewer3D } from "./components/MoleculeViewer3D";
 
 const DEFAULT_METHODS: MethodOption[] = ["RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3"];
 const DEFAULT_BASIS_SETS: BasisOption[] = ["sto-3g", "6-31g", "cc-pvdz", "cc-pvtz"];
@@ -62,9 +65,10 @@ export default function App() {
   const attachStream = (job: JobRecord) => {
     if (unsubscribeRef.current) unsubscribeRef.current();
     setActiveJob(job);
+    setGeometry(job.geometry_xyz);
     setIterations(job.result?.iterations ?? []);
 
-    if (job.status === "completed" || job.status === "failed") {
+    if (job.status === "completed" || job.status === "failed" || job.status === "cancelled") {
       return;
     }
 
@@ -119,6 +123,30 @@ export default function App() {
     }
   };
 
+  const handleCancel = async () => {
+    if (!activeJob) return;
+    setError(null);
+    try {
+      const updated = await cancelJob(activeJob.id);
+      attachStream(updated);
+      void refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel job.");
+    }
+  };
+
+  const handleRetry = async () => {
+    if (!activeJob) return;
+    setError(null);
+    try {
+      const requeued = await retryJob(activeJob.id);
+      attachStream(requeued);
+      void refreshHistory();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to retry job.");
+    }
+  };
+
   const methodOptions = capabilities?.methods ?? DEFAULT_METHODS;
   const basisOptions = capabilities?.basis_sets ?? DEFAULT_BASIS_SETS;
   const engineLabel = capabilities
@@ -131,7 +159,7 @@ export default function App() {
         <div>
           <h1>mshqc-workbench</h1>
           <p className="subtitle">
-            Async Compute Queue, SHA-256 Deduplication, and Live SSE Telemetry
+            Async Compute Queue, SHA-256 Deduplication, Rate Limiting, and Live SSE Telemetry
           </p>
         </div>
         <span className="pill">{engineLabel}</span>
@@ -230,9 +258,21 @@ export default function App() {
                 </span>
                 {activeJob.cache_hit && <span className="badge badge-cache">CACHE HIT</span>}
                 {activeJob.engine && <span className="badge badge-engine">{activeJob.engine}</span>}
+                {(activeJob.status === "queued" || activeJob.status === "running") && (
+                  <button type="button" className="btn-danger" onClick={() => void handleCancel()}>
+                    Cancel
+                  </button>
+                )}
+                {(activeJob.status === "failed" || activeJob.status === "cancelled") && (
+                  <button type="button" className="btn-secondary" onClick={() => void handleRetry()}>
+                    Retry
+                  </button>
+                )}
               </div>
             )}
           </div>
+
+          <MoleculeViewer3D geometryXyz={geometry} />
 
           {activeJob?.result && (
             <div className="metrics">
