@@ -89,8 +89,8 @@ make bench-update
 <!-- BENCHMARK_START -->
 | Workload Scenario | Requests | Concurrency | Cache Hits | Errors | Throughput (req/s) | p50 (ms) | p95 (ms) | p99 (ms) |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Unique Jobs (Cache Miss + Enqueue) | 100 | 10 | TBD | TBD | TBD (run `make bench-update`) | TBD | TBD | TBD |
-| Identical Canonical Geometry (SHA-256 Hit) | 100 | 10 | TBD | TBD | TBD (run `make bench-update`) | TBD | TBD | TBD |
+| Unique Jobs (Cache Miss + Enqueue) | 100 | 10 | 0 | 0 | 529.91 | 13.97 | 28.02 | 30.92 |
+| Identical Canonical Geometry (SHA-256 Hit) | 100 | 10 | 100 | 0 | 607.05 | 14.55 | 26.23 | 28.45 |
 
-*Hardware baseline: Run `make bench-update` or trigger the GitHub Actions Benchmark workflow to record measured metrics.*
+*Hardware baseline: AMD Ryzen 5 6600H with Radeon Graphics (12 threads), Linux 7.3.3-200.fc44.x86_64, Python 3.14.7, measured on 2026-11-24 UTC.*
 <!-- BENCHMARK_END -->
