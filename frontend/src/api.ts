@@ -7,6 +7,7 @@ export type MethodOption =
   | "ROMP2"
   | "RMP3"
   | "UMP3"
+  | "ROMP3"
   | "OMP2"
   | "SCS-OMP2"
   | "SOS-OMP2"
@@ -14,7 +15,8 @@ export type MethodOption =
   | "OMP2.5"
   | "OMP3"
   | "KAPPA-OMP2";
-export type BasisOption = "sto-3g" | "6-31g" | "cc-pvdz" | "cc-pvtz";
+
+export type EriOption = "auto" | "df" | "cholesky" | "exact";
 export type JobStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Capabilities {
@@ -22,7 +24,11 @@ export interface Capabilities {
   mshqc_installed: boolean;
   mshqc_version: string | null;
   methods: MethodOption[];
-  basis_sets: BasisOption[];
+  basis_sets: string[];
+  ri_basis_sets: string[];
+  eri_methods: EriOption[];
+  basis_dir: string | null;
+  discovered_basis_count: number;
 }
 
 export interface IterationPoint {
@@ -30,6 +36,7 @@ export interface IterationPoint {
   energy_hartree: number;
   delta_e: number;
   elapsed_ms: number;
+  stage?: string;
 }
 
 export interface JobResult {
@@ -41,6 +48,14 @@ export interface JobResult {
   converged: boolean;
   iterations: IterationPoint[];
   wall_time_ms: number;
+  energy_scf_hartree?: number | null;
+  energy_corr_hartree?: number | null;
+  energy_mp2_hartree?: number | null;
+  energy_mp3_hartree?: number | null;
+  s2?: number | null;
+  n_basis_functions?: number | null;
+  eri_method?: string;
+  n_frozen?: number;
 }
 
 export interface JobRecord {
@@ -48,9 +63,11 @@ export interface JobRecord {
   input_hash: string;
   status: JobStatus;
   method: MethodOption;
-  basis: BasisOption;
+  basis: string;
   charge: number;
   multiplicity: number;
+  eri_method: EriOption;
+  freeze_core: boolean;
   geometry_xyz: string;
   engine: string | null;
   result: JobResult | null;
@@ -64,11 +81,11 @@ const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
 async function parseError(res: Response, fallback: string): Promise<Error> {
   const errBody = (await res.json().catch(() => ({}))) as { detail?: string };
-  return new Error(errBody.detail || fallback + " (" + res.status + ")");
+  return new Error(errBody.detail || `${fallback} (${res.status})`);
 }
 
 export async function fetchCapabilities(): Promise<Capabilities> {
-  const res = await fetch(API_BASE + "/api/v1/capabilities");
+  const res = await fetch(`${API_BASE}/api/v1/capabilities`);
   if (!res.ok) throw await parseError(res, "Failed to fetch capabilities");
   return (await res.json()) as Capabilities;
 }
@@ -76,11 +93,13 @@ export async function fetchCapabilities(): Promise<Capabilities> {
 export async function submitJob(payload: {
   geometry_xyz: string;
   method: MethodOption;
-  basis: BasisOption;
+  basis: string;
   charge: number;
   multiplicity: number;
+  eri_method: EriOption;
+  freeze_core: boolean;
 }): Promise<JobRecord> {
-  const res = await fetch(API_BASE + "/api/v1/jobs", {
+  const res = await fetch(`${API_BASE}/api/v1/jobs`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload)
@@ -90,19 +109,19 @@ export async function submitJob(payload: {
 }
 
 export async function cancelJob(jobId: string): Promise<JobRecord> {
-  const res = await fetch(API_BASE + "/api/v1/jobs/" + jobId + "/cancel", { method: "POST" });
+  const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/cancel`, { method: "POST" });
   if (!res.ok) throw await parseError(res, "Cancel failed");
   return (await res.json()) as JobRecord;
 }
 
 export async function retryJob(jobId: string): Promise<JobRecord> {
-  const res = await fetch(API_BASE + "/api/v1/jobs/" + jobId + "/retry", { method: "POST" });
+  const res = await fetch(`${API_BASE}/api/v1/jobs/${jobId}/retry`, { method: "POST" });
   if (!res.ok) throw await parseError(res, "Retry failed");
   return (await res.json()) as JobRecord;
 }
 
 export async function fetchJobs(): Promise<JobRecord[]> {
-  const res = await fetch(API_BASE + "/api/v1/jobs?limit=20");
+  const res = await fetch(`${API_BASE}/api/v1/jobs?limit=25`);
   if (!res.ok) throw await parseError(res, "Failed to fetch job history");
   return (await res.json()) as JobRecord[];
 }
@@ -120,7 +139,7 @@ export function subscribeJobEvents(
     onError: () => void;
   }
 ): () => void {
-  const source = new EventSource(API_BASE + "/api/v1/jobs/" + jobId + "/events");
+  const source = new EventSource(`${API_BASE}/api/v1/jobs/${jobId}/events`);
 
   source.addEventListener("iteration", (evt) => {
     const data = JSON.parse((evt as MessageEvent).data) as IterationPoint;
