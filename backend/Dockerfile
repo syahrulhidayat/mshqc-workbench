@@ -1,17 +1,19 @@
-FROM python:3.12-slim
+FROM docker.io/library/python:3.12-slim
 
-ARG INSTALL_MSHQC=false
-
-WORKDIR /srv/backend
+WORKDIR /app
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+ARG INSTALL_MSHQC=false
+ARG MSHQC_INSTALL_SPEC=mshqc
+
 COPY pyproject.toml ./
 COPY app ./app
-RUN if [ "$INSTALL_MSHQC" = "true" ]; then \
-      pip install --no-cache-dir -e ".[mshqc]"; \
-    else \
-      pip install --no-cache-dir -e .; \
+
+RUN pip install --no-cache-dir . && \
+    if [ "$INSTALL_MSHQC" = "true" ]; then \
+      pip install --no-cache-dir "$MSHQC_INSTALL_SPEC"; \
     fi
 
 EXPOSE 8000
+CMD ["uvicorn", "app.api.main:app", "--host", "0.0.0.0", "--port", "8000"]

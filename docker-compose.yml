@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16-alpine
+    image: docker.io/library/postgres:16-alpine
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-workbench}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-workbench_dev_pass}
@@ -16,7 +16,7 @@ services:
       retries: 10
 
   redis:
-    image: redis:7-alpine
+    image: docker.io/library/redis:7-alpine
     ports:
       - "6379:6379"
     healthcheck:
@@ -31,12 +31,15 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_MSHQC: ${INSTALL_MSHQC:-false}
+        MSHQC_INSTALL_SPEC: ${MSHQC_INSTALL_SPEC:-mshqc}
     command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://workbench:workbench_dev_pass@postgres:5432/mshqc_workbench}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:5173}
       SOLVER_BACKEND: ${SOLVER_BACKEND:-auto}
+      MSHQC_ERI_METHOD: ${MSHQC_ERI_METHOD:-auto}
+      MSHQC_BASIS_PATH: ${MSHQC_BASIS_PATH:-}
       RATE_LIMIT_REQUESTS: ${RATE_LIMIT_REQUESTS:-300}
       RATE_LIMIT_WINDOW_S: ${RATE_LIMIT_WINDOW_S:-60}
     ports:
@@ -58,11 +61,14 @@ services:
       dockerfile: Dockerfile
       args:
         INSTALL_MSHQC: ${INSTALL_MSHQC:-false}
+        MSHQC_INSTALL_SPEC: ${MSHQC_INSTALL_SPEC:-mshqc}
     command: python -m app.worker.runner
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://workbench:workbench_dev_pass@postgres:5432/mshqc_workbench}
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       SOLVER_BACKEND: ${SOLVER_BACKEND:-auto}
+      MSHQC_ERI_METHOD: ${MSHQC_ERI_METHOD:-auto}
+      MSHQC_BASIS_PATH: ${MSHQC_BASIS_PATH:-}
     depends_on:
       postgres:
         condition: service_healthy
