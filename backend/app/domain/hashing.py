@@ -13,10 +13,16 @@ def canonical_job_hash(
     basis: str,
     charge: int,
     multiplicity: int,
+    eri_method: str = "auto",
+    freeze_core: bool = False,
+    engine_family: str = "surrogate",
 ) -> str:
     payload = {
+        "engine_family": engine_family.strip().lower(),
         "method": method.strip().upper(),
         "basis": basis.strip().lower(),
+        "eri_method": eri_method.strip().lower(),
+        "freeze_core": bool(freeze_core),
         "charge": int(charge),
         "multiplicity": int(multiplicity),
         "atoms": [
