@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   type BasisOption,
+  type Capabilities,
+  fetchCapabilities,
   fetchJobs,
   type IterationPoint,
   type JobRecord,
@@ -9,6 +11,9 @@ import {
   subscribeJobEvents
 } from "./api";
 import { ConvergenceChart } from "./components/ConvergenceChart";
+
+const DEFAULT_METHODS: MethodOption[] = ["RHF", "UHF", "RMP2", "UMP2", "OMP2", "OMP3"];
+const DEFAULT_BASIS_SETS: BasisOption[] = ["sto-3g", "6-31g", "cc-pvdz", "cc-pvtz"];
 
 const PRESETS: Record<string, string> = {
   "H2O (Water)":
@@ -26,6 +31,7 @@ export default function App() {
   const [charge, setCharge] = useState(0);
   const [multiplicity, setMultiplicity] = useState(1);
 
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
   const [activeJob, setActiveJob] = useState<JobRecord | null>(null);
   const [iterations, setIterations] = useState<IterationPoint[]>([]);
   const [history, setHistory] = useState<JobRecord[]>([]);
@@ -45,6 +51,9 @@ export default function App() {
 
   useEffect(() => {
     void refreshHistory();
+    void fetchCapabilities()
+      .then((caps) => setCapabilities(caps))
+      .catch(() => undefined);
     return () => {
       if (unsubscribeRef.current) unsubscribeRef.current();
     };
@@ -110,6 +119,12 @@ export default function App() {
     }
   };
 
+  const methodOptions = capabilities?.methods ?? DEFAULT_METHODS;
+  const basisOptions = capabilities?.basis_sets ?? DEFAULT_BASIS_SETS;
+  const engineLabel = capabilities
+    ? "Engine: " + capabilities.active_engine
+    : "REST + Redis + PostgreSQL";
+
   return (
     <div className="layout">
       <header className="topbar">
@@ -119,7 +134,7 @@ export default function App() {
             Async Compute Queue, SHA-256 Deduplication, and Live SSE Telemetry
           </p>
         </div>
-        <span className="pill">REST + Redis + PostgreSQL</span>
+        <span className="pill">{engineLabel}</span>
       </header>
 
       <main className="grid">
@@ -154,18 +169,22 @@ export default function App() {
               <label>
                 Method
                 <select value={method} onChange={(e) => setMethod(e.target.value as MethodOption)}>
-                  <option value="RHF">RHF</option>
-                  <option value="RMP2">RMP2</option>
-                  <option value="OMP2">OMP2</option>
+                  {methodOptions.map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
                 </select>
               </label>
 
               <label>
                 Basis Set
                 <select value={basis} onChange={(e) => setBasis(e.target.value as BasisOption)}>
-                  <option value="sto-3g">sto-3g</option>
-                  <option value="6-31g">6-31g</option>
-                  <option value="cc-pvdz">cc-pvdz</option>
+                  {basisOptions.map((b) => (
+                    <option key={b} value={b}>
+                      {b}
+                    </option>
+                  ))}
                 </select>
               </label>
             </div>
@@ -206,7 +225,7 @@ export default function App() {
             <h2>Execution Telemetry</h2>
             {activeJob && (
               <div className="badges">
-                <span className={`badge status-${activeJob.status}`}>
+                <span className={"badge status-" + activeJob.status}>
                   {activeJob.status.toUpperCase()}
                 </span>
                 {activeJob.cache_hit && <span className="badge badge-cache">CACHE HIT</span>}
@@ -283,7 +302,7 @@ export default function App() {
                       {job.method} / {job.basis}
                     </td>
                     <td>
-                      <span className={`badge status-${job.status}`}>{job.status}</span>
+                      <span className={"badge status-" + job.status}>{job.status}</span>
                     </td>
                     <td className="mono">{job.engine || "-"}</td>
                     <td className="mono">
