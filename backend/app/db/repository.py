@@ -104,34 +104,60 @@ class JobRepository:
             ).fetchall()
             return [_to_job_row(r) for r in rows]
 
-    def mark_running(self, job_id: str) -> None:
+    def mark_running(self, job_id: str) -> bool:
+        sql = (
+            "UPDATE compute_jobs SET status = 'running', updated_at = NOW() "
+            "WHERE id = %s AND status = 'queued' RETURNING id"
+        )
         with self._pool.connection() as conn:
-            conn.execute(
-                "UPDATE compute_jobs SET status = 'running', updated_at = NOW() WHERE id = %s",
-                (job_id,),
-            )
+            row = conn.execute(sql, (job_id,)).fetchone()
             conn.commit()
+            return row is not None
 
-    def mark_completed(self, job_id: str, engine: str, result: dict[str, Any]) -> None:
+    def mark_completed(self, job_id: str, engine: str, result: dict[str, Any]) -> bool:
         sql = (
             "UPDATE compute_jobs "
             "SET status = 'completed', engine = %s, result_json = %s::jsonb, "
             "error_message = NULL, updated_at = NOW() "
-            "WHERE id = %s"
+            "WHERE id = %s AND status != 'cancelled' RETURNING id"
         )
         with self._pool.connection() as conn:
-            conn.execute(sql, (engine, json.dumps(result), job_id))
+            row = conn.execute(sql, (engine, json.dumps(result), job_id)).fetchone()
             conn.commit()
+            return row is not None
 
     def mark_failed(self, job_id: str, error_message: str) -> None:
         sql = (
             "UPDATE compute_jobs "
             "SET status = 'failed', error_message = %s, updated_at = NOW() "
-            "WHERE id = %s"
+            "WHERE id = %s AND status != 'cancelled'"
         )
         with self._pool.connection() as conn:
             conn.execute(sql, (error_message[:1000], job_id))
             conn.commit()
+
+    def mark_cancelled(self, job_id: str) -> JobRow | None:
+        sql = (
+            "UPDATE compute_jobs "
+            "SET status = 'cancelled', error_message = 'Cancelled by user.', updated_at = NOW() "
+            "WHERE id = %s AND status IN ('queued', 'running') RETURNING *"
+        )
+        with self._pool.connection() as conn:
+            row = conn.execute(sql, (job_id,)).fetchone()
+            conn.commit()
+            return _to_job_row(row) if row is not None else None
+
+    def reset_for_retry(self, job_id: str) -> JobRow | None:
+        sql = (
+            "UPDATE compute_jobs "
+            "SET status = 'queued', engine = NULL, result_json = NULL, "
+            "error_message = NULL, updated_at = NOW() "
+            "WHERE id = %s AND status IN ('failed', 'cancelled') RETURNING *"
+        )
+        with self._pool.connection() as conn:
+            row = conn.execute(sql, (job_id,)).fetchone()
+            conn.commit()
+            return _to_job_row(row) if row is not None else None
 
 
 def _to_job_row(raw: dict[str, Any]) -> JobRow:

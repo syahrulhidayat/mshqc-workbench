@@ -12,6 +12,8 @@ class Settings:
     solver_backend: str
     queue_key: str = "mshqc:queue"
     event_channel_prefix: str = "mshqc:events:"
+    rate_limit_requests: int = 300
+    rate_limit_window_s: int = 60
 
 
 def load_settings() -> Settings:
@@ -25,4 +27,6 @@ def load_settings() -> Settings:
         redis_url=os.getenv("REDIS_URL", "redis://localhost:6379/0"),
         cors_origins=origins,
         solver_backend=os.getenv("SOLVER_BACKEND", "auto").strip().lower(),
+        rate_limit_requests=int(os.getenv("RATE_LIMIT_REQUESTS", "300")),
+        rate_limit_window_s=int(os.getenv("RATE_LIMIT_WINDOW_S", "60")),
     )

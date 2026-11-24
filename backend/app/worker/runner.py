@@ -36,11 +36,15 @@ def process_job(
     if job is None:
         logger.warning("Job %s missing in database, skipping.", job_id)
         return
-    if job.status == "completed":
+    if job.status != "queued":
+        logger.info("Skipping job %s in non-queued state '%s'.", job_id, job.status)
+        return
+
+    if not repo.mark_running(job_id):
+        logger.info("Job %s transitioned before worker lock, skipping.", job_id)
         return
 
     channel = f"{channel_prefix}{job_id}"
-    repo.mark_running(job_id)
 
     def publish_iteration(rec: IterationRecord) -> None:
         envelope = {"type": "iteration", "payload": asdict(rec)}
@@ -58,7 +62,11 @@ def process_job(
             on_iteration=publish_iteration,
         )
         result_dict = asdict(result)
-        repo.mark_completed(job_id, result.engine, result_dict)
+        committed = repo.mark_completed(job_id, result.engine, result_dict)
+        if not committed:
+            logger.info("Job %s was cancelled during compute; discarding result.", job_id)
+            return
+
         redis_client.publish(
             channel,
             json.dumps(

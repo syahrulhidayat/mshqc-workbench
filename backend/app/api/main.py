@@ -10,6 +10,7 @@ from fastapi import FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
+from app.api.rate_limit import check_rate_limit
 from app.api.schemas import CapabilitiesResponse, JobCreateRequest, JobResponse
 from app.config import Settings, load_settings
 from app.db.repository import JobRepository, JobRow
@@ -35,6 +36,13 @@ def _serialize_job(row: JobRow, *, cache_hit: bool = False) -> JobResponse:
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -64,7 +72,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if application.state.owns_repo:
                 application.state.repo.close()
 
-    app = FastAPI(title="mshqc-workbench API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="mshqc-workbench API", version="0.2.0", lifespan=lifespan)
     app.state.settings = cfg
 
     app.add_middleware(
@@ -100,6 +108,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: Request,
         response: Response,
     ) -> JobResponse:
+        rl = await check_rate_limit(
+            request.app.state.redis,
+            client_key=_client_ip(request),
+            limit=cfg.rate_limit_requests,
+            window_s=cfg.rate_limit_window_s,
+        )
+        if rl.limit > 0:
+            response.headers["X-RateLimit-Limit"] = str(rl.limit)
+            response.headers["X-RateLimit-Remaining"] = str(rl.remaining)
+        if not rl.allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Rate limit exceeded. Retry in {rl.retry_after_s}s.",
+                headers={
+                    "Retry-After": str(rl.retry_after_s),
+                    "X-RateLimit-Limit": str(rl.limit),
+                    "X-RateLimit-Remaining": "0",
+                },
+            )
+
         try:
             atoms = parse_xyz(payload.geometry_xyz)
             validate_spin_parity(atoms, payload.charge, payload.multiplicity)
@@ -138,6 +166,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return _serialize_job(row, cache_hit=cache_hit)
 
+    @app.post("/api/v1/jobs/{job_id}/cancel", response_model=JobResponse)
+    async def cancel_job(job_id: str, request: Request) -> JobResponse:
+        existing = await asyncio.to_thread(request.app.state.repo.get_by_id, job_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+
+        updated = await asyncio.to_thread(request.app.state.repo.mark_cancelled, job_id)
+        if updated is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Cannot cancel job in '{existing.status}' state.",
+            )
+
+        channel = f"{cfg.event_channel_prefix}{job_id}"
+        await request.app.state.redis.publish(
+            channel,
+            json.dumps(
+                {
+                    "type": "done",
+                    "payload": {
+                        "status": "cancelled",
+                        "engine": None,
+                        "result": None,
+                        "error_message": updated.error_message,
+                    },
+                }
+            ),
+        )
+        return _serialize_job(updated)
+
+    @app.post("/api/v1/jobs/{job_id}/retry", response_model=JobResponse)
+    async def retry_job(job_id: str, request: Request) -> JobResponse:
+        existing = await asyncio.to_thread(request.app.state.repo.get_by_id, job_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="Job not found.")
+
+        requeued = await asyncio.to_thread(request.app.state.repo.reset_for_retry, job_id)
+        if requeued is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Only failed or cancelled jobs can be retried "
+                    f"(current: '{existing.status}')."
+                ),
+            )
+
+        await request.app.state.redis.lpush(cfg.queue_key, requeued.id)
+        return _serialize_job(requeued)
+
     @app.get("/api/v1/jobs", response_model=list[JobResponse])
     async def list_jobs(request: Request, limit: int = 25) -> list[JobResponse]:
         clamped = max(1, min(limit, 100))
@@ -160,7 +237,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         channel = f"{cfg.event_channel_prefix}{job_id}"
 
         async def event_stream() -> AsyncIterator[str]:
-            # Subscribe before re-reading DB status to prevent missing terminal events.
             pubsub = request.app.state.redis.pubsub()
             await pubsub.subscribe(channel)
             try:
@@ -168,7 +244,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 if current is None:
                     return
 
-                if current.status in {"completed", "failed"}:
+                if current.status in {"completed", "failed", "cancelled"}:
                     if current.result_json:
                         for item in current.result_json.get("iterations", []):
                             yield f"event: iteration\ndata: {json.dumps(item)}\n\n"
